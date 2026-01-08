@@ -95,7 +95,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     message: '',
     clientResponse: '',
     clientFeedback: '',
-    onboardingStatus: undefined, // Default to Pipeline/Pending
+    onboardingStatus: undefined,
     demoSelected: false,
     demoDescription: '',
     demoOutcome: '',
@@ -114,6 +114,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   const [showRecordVault, setShowRecordVault] = useState(false);
   const [vaultFilter, setVaultFilter] = useState<RecordFilterType>('processing');
 
+  // Firebase Sanitization Utility: Firebase doesn't allow 'undefined'. 
+  // We convert 'undefined' to 'null' to remove the key in Firebase.
+  const sanitize = (obj: any) => {
+    const sanitized: any = {};
+    Object.keys(obj).forEach((key) => {
+      sanitized[key] = obj[key] === undefined ? null : obj[key];
+    });
+    return sanitized;
+  };
+
   useEffect(() => {
     if (!isAuthenticated) return;
 
@@ -124,9 +134,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       const data = snapshot.val();
       if (data) {
         const list = Object.entries(data).map(([key, value]: [string, any]) => ({
-          status: 'new',
           ...value,
-          id: key
+          id: key,
+          status: value.status || 'new'
         })).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
         setInquiries(list);
       } else {
@@ -153,7 +163,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     };
   }, [isAuthenticated]);
 
-  // Click outside to close suggestions
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (suggestionRef.current && !suggestionRef.current.contains(event.target as Node)) {
@@ -186,12 +195,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     setFormLoading(true);
     try {
       const inquiriesRef = ref(db, 'inquiries');
-      await push(inquiriesRef, {
+      const payload = sanitize({
         ...newLog,
         timestamp: new Date().toISOString(),
         status: newLog.onboardingStatus === 'onboarded' ? 'processed' : 'new',
         source: 'Command Terminal Sales Log'
       });
+      await push(inquiriesRef, payload);
       alert('Sales Record Logged Successfully.');
       setNewLog({
         name: '', ownerName: '', email: '', phone: '', address: '',
@@ -202,6 +212,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       });
       setActiveTab('history');
     } catch (err) {
+      console.error(err);
       alert('Failed to log entry.');
     } finally {
       setFormLoading(false);
@@ -211,8 +222,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   const deleteItem = async (type: 'inquiries' | 'subscribers', id: string) => {
     const itemName = type === 'subscribers' ? 'subscriber' : 'record';
     if (confirm(`Permanently purge this ${itemName}?`)) {
-      await remove(ref(db, `${type}/${id}`));
-      if (type === 'inquiries') setViewingInquiry(null);
+      try {
+        await remove(ref(db, `${type}/${id}`));
+        if (type === 'inquiries') setViewingInquiry(null);
+      } catch (err) {
+        console.error(err);
+        alert('Failed to delete item.');
+      }
     }
   };
 
@@ -220,7 +236,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     if (!editingInquiry) return;
     try {
       const { id, ...data } = editingInquiry;
-      const updateData = { ...data };
+      const updateData = sanitize({ ...data });
       
       if (isNewInteractionMode) {
         const inquiriesRef = ref(db, 'inquiries');
@@ -228,10 +244,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
           ...updateData,
           timestamp: new Date().toISOString(),
           status: updateData.onboardingStatus === 'onboarded' ? 'processed' : (updateData.status || 'new'),
-          source: 'CRM Detail Overwrite'
+          source: 'CRM Detail Interaction'
         });
       } else {
-        if (activeTab === 'inquiries' || updateData.onboardingStatus) {
+        if (activeTab === 'inquiries' || updateData.onboardingStatus === 'onboarded') {
           updateData.status = updateData.status || 'processed';
         }
         await update(ref(db, `inquiries/${id}`), updateData);
@@ -240,10 +256,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       setEditingInquiry(null);
       setIsNewInteractionMode(false);
       if (viewingInquiry && viewingInquiry.id === id) {
-        setViewingInquiry({ ...viewingInquiry, ...updateData });
+        const freshData = { ...viewingInquiry, ...updateData };
+        // If we set something to null (deleted), remove it from local state too
+        Object.keys(freshData).forEach(k => { if (freshData[k as keyof Inquiry] === null) delete freshData[k as keyof Inquiry]; });
+        setViewingInquiry(freshData);
       }
       alert(isNewInteractionMode ? 'New interaction logged.' : 'Record updated successfully.');
     } catch (err) {
+      console.error(err);
       alert('Operation failed.');
     }
   };
@@ -293,7 +313,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       const data = map.get(key)!;
       data.inquiries.push(inq);
       
-      // Keep most detailed metadata
       if (!data.ownerName && inq.ownerName) data.ownerName = inq.ownerName;
       if (!data.address && inq.address) data.address = inq.address;
       
@@ -304,14 +323,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     return Array.from(map.values()).sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   }, [inquiries]);
 
-  const selectedCustomerEmailVal = selectedCustomerEmail;
-
   const selectedCustomer = useMemo(() => {
-    if (!selectedCustomerEmailVal) return null;
-    return groupedCustomers.find(c => c.email.toLowerCase() === selectedCustomerEmailVal.toLowerCase() || c.phone === selectedCustomerEmailVal) || null;
-  }, [selectedCustomerEmailVal, groupedCustomers]);
+    if (!selectedCustomerEmail) return null;
+    return groupedCustomers.find(c => c.email.toLowerCase() === selectedCustomerEmail.toLowerCase() || c.phone === selectedCustomerEmail) || null;
+  }, [selectedCustomerEmail, groupedCustomers]);
 
-  // Suggestions filter
   const getSuggestions = (input: string) => {
     if (!input || input.length < 2) return [];
     const lowerInput = input.toLowerCase();
@@ -445,7 +461,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
   return (
     <div className="min-h-screen bg-[#080808] text-gray-100 flex font-sans overflow-hidden">
-      {/* Sidebar */}
       <aside className="w-64 border-r border-white/5 flex flex-col p-6 hidden lg:flex h-screen sticky top-0 bg-[#0a0a0a]">
         <div className="mb-12 flex items-center gap-3">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-black text-xs text-white shadow-lg shadow-blue-600/20">E</div>
@@ -533,7 +548,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
         <div className="p-8 overflow-y-auto flex-grow space-y-8 custom-scrollbar">
           {activeTab === 'sales-log' ? (
-            /* MANUAL SALES LOG ENTRY FORM */
             <div className="max-w-5xl mx-auto space-y-8 animate-fade-in-up pb-12">
                <div className="bg-[#111] p-10 rounded-[3.5rem] border border-white/5 shadow-2xl relative overflow-hidden">
                   <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-blue-600 to-indigo-800"></div>
@@ -547,7 +561,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
                   <form onSubmit={handleSalesLogSubmit} className="space-y-10">
                     <div className="grid md:grid-cols-2 gap-x-12 gap-y-8">
-                      {/* Identity Section */}
                       <div className="space-y-6">
                         <label className="text-[10px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2"><Building2 size={12}/> Client Identification</label>
                         <div className="space-y-4">
@@ -563,7 +576,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                               }}
                               onFocus={() => setShowSuggestions('new')}
                             />
-                            {/* NEW LOG SUGGESTIONS */}
                             {showSuggestions === 'new' && getSuggestions(newLog.name || '').length > 0 && (
                               <div ref={suggestionRef} className="absolute z-50 left-0 right-0 top-full mt-2 bg-[#1a1a1a] border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden animate-fade-in">
                                 {getSuggestions(newLog.name || '').map((client, idx) => (
@@ -614,7 +626,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                         </div>
                       </div>
 
-                      {/* Interaction Intelligence Section */}
                       <div className="space-y-6">
                         <label className="text-[10px] font-black text-purple-500 uppercase tracking-widest flex items-center gap-2"><MessageSquareQuote size={12}/> Meeting Intelligence</label>
                         <div className="space-y-4">
@@ -644,7 +655,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     </div>
 
                     <div className="pt-8 border-t border-white/5 grid md:grid-cols-2 gap-12">
-                      {/* Strategic Toggle Section */}
                       <div className="space-y-6">
                          <label className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Deployment Strategy</label>
                          <div className="grid grid-cols-2 gap-4">
@@ -677,7 +687,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                          </div>
                       </div>
 
-                      {/* Onboarding & Demo Detail Extensions */}
                       <div className="space-y-6">
                         {newLog.onboardingStatus === 'onboarded' && (
                           <div className="space-y-4 animate-fade-in-up">
@@ -711,7 +720,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                       </div>
                     </div>
 
-                    {/* New Textarea for Special Requests / Edits */}
                     <div className="space-y-4 pt-8 border-t border-white/5">
                       <label className="text-[10px] font-black text-orange-500 uppercase tracking-widest flex items-center gap-2"><Settings2 size={12}/> Custom Requirements / Edits Requested</label>
                       <textarea 
@@ -734,7 +742,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                </div>
             </div>
           ) : (
-            /* ALL OTHER TABS */
             <>
               {!selectedCustomerEmail && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
@@ -791,7 +798,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     {['inquiries', 'history'].includes(activeTab) && !selectedCustomerEmail && (
                       <button 
                         onClick={() => setShowRecordVault(true)}
-                        className="px-5 py-2.5 bg-blue-600 border border-blue-500/20 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all flex items-center gap-2 shadow-xl shadow-blue-600/10"
+                        className="px-5 py-2.5 bg-blue-600 border border-blue-500/20 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all flex items-center justify-center gap-2 shadow-xl shadow-blue-600/10"
                       >
                         <Archive size={14} className="text-white" /> Access Operational Vault
                       </button>
@@ -799,7 +806,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                 </div>
 
                 {selectedCustomerEmail && selectedCustomer ? (
-                  /* Single Customer CRM View */
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in-up">
                     <div className="lg:col-span-1 space-y-6">
                       <div className="bg-[#111] p-8 rounded-[3rem] border border-white/5 text-center relative overflow-hidden">
@@ -865,7 +871,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     </div>
                   </div>
                 ) : (
-                  /* Global Data Table View */
                   <div className="bg-[#111] rounded-[2.5rem] border border-white/5 overflow-hidden shadow-2xl">
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
@@ -1004,7 +1009,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
         </div>
       </main>
 
-      {/* MODAL: FULL SCREEN OPERATIONAL VAULT */}
       {showRecordVault && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black animate-fade-in">
           <div className="w-full h-full bg-[#0a0a0a] flex flex-col relative overflow-hidden">
@@ -1100,7 +1104,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
         </div>
       )}
 
-      {/* MODAL 1: DETAILED INQUIRY RECORD */}
       {viewingInquiry && (
         <div className="fixed inset-0 z-[150] flex items-center justify-center p-6 bg-black/90 backdrop-blur-md animate-fade-in">
           <div className="w-full max-w-4xl bg-[#0a0a0a] border border-white/10 rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -1123,7 +1126,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
             <div className="p-10 overflow-y-auto space-y-8 custom-scrollbar">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                {/* Contact Segment */}
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Identity & Contact</p>
                   <div className="space-y-3">
@@ -1150,7 +1152,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   </div>
                 </div>
 
-                {/* Engagement Intelligence */}
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Intelligence</p>
                   <div className="space-y-3">
@@ -1169,7 +1170,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   </div>
                 </div>
 
-                {/* Strategy Segment */}
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Lifecycle Outcome</p>
                   <div className="p-6 rounded-[2rem] border border-emerald-500/20 bg-emerald-500/5">
@@ -1186,7 +1186,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                 </div>
               </div>
 
-              {/* Narratives & Special Requests */}
               <div className="grid md:grid-cols-2 gap-8">
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><FileText size={14}/> Meeting Brief</p>
@@ -1220,7 +1219,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
         </div>
       )}
 
-      {/* MODAL 2: FULL COMPREHENSIVE EDIT (Mirrors New Sales Engagement) */}
       {editingInquiry && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-black/95 backdrop-blur-xl animate-fade-in">
           <div className="w-full max-w-5xl bg-[#111] border border-white/10 rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -1248,7 +1246,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
             <div className="p-12 overflow-y-auto custom-scrollbar flex-grow bg-gradient-to-b from-black/20 to-transparent">
               <div className="space-y-12">
                 <div className="grid md:grid-cols-2 gap-x-12 gap-y-8">
-                  {/* Identity Section */}
                   <div className="space-y-6">
                     <label className="text-[10px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2"><Building2 size={12}/> Client Identification</label>
                     <div className="space-y-4">
@@ -1264,7 +1261,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                           }}
                           onFocus={() => setShowSuggestions('edit')}
                         />
-                        {/* EDIT LOG SUGGESTIONS */}
                         {showSuggestions === 'edit' && getSuggestions(editingInquiry.name || '').length > 0 && (
                           <div ref={suggestionRef} className="absolute z-50 left-0 right-0 top-full mt-2 bg-[#1a1a1a] border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden animate-fade-in">
                             {getSuggestions(editingInquiry.name || '').map((client, idx) => (
@@ -1315,7 +1311,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     </div>
                   </div>
 
-                  {/* Interaction Intelligence Section */}
                   <div className="space-y-6">
                     <label className="text-[10px] font-black text-purple-500 uppercase tracking-widest flex items-center gap-2"><MessageSquareQuote size={12}/> Meeting Intelligence</label>
                     <div className="space-y-4">
@@ -1345,7 +1340,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                 </div>
 
                 <div className="pt-10 border-t border-white/5 grid md:grid-cols-2 gap-12">
-                  {/* Strategic Toggle Section */}
                   <div className="space-y-6">
                      <label className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Deployment Strategy</label>
                      <div className="grid grid-cols-2 gap-4">
@@ -1378,7 +1372,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                      </div>
                   </div>
 
-                  {/* Onboarding & Demo Detail Extensions */}
                   <div className="space-y-6">
                     {editingInquiry.onboardingStatus === 'onboarded' && (
                       <div className="space-y-4 animate-fade-in-up">
@@ -1412,7 +1405,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   </div>
                 </div>
 
-                {/* Special Requests / Edits */}
                 <div className="space-y-4 pt-10 border-t border-white/5">
                   <label className="text-[10px] font-black text-orange-500 uppercase tracking-widest flex items-center gap-2"><Settings2 size={12}/> Custom Requirements / Edits Requested</label>
                   <textarea 
