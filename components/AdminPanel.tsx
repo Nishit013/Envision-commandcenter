@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   LayoutDashboard, Users, MessageSquare, Bell, LogOut, 
   Search, ShieldCheck, Mail, Zap, Download, Trash2, Database,
@@ -7,7 +7,8 @@ import {
   CheckCircle2, XCircle, Package, ExternalLink, MessageCircle,
   Archive, Filter, ListFilter, History, MapPin, Store, Maximize2,
   Coffee, Banknote, Receipt, Globe, MessageSquareQuote, MousePointer2, UserPlus,
-  FileText, ClipboardList, MonitorPlay, Star, Building2
+  FileText, ClipboardList, MonitorPlay, Star, Building2, CalendarDays, Settings2,
+  MessageSquareDiff, SearchCode, Plus, AlertCircle
 } from 'lucide-react';
 import { db, ref, onValue, remove, update, push } from '../firebaseConfig';
 
@@ -30,6 +31,10 @@ interface Inquiry {
   demoSelected?: boolean;
   demoDescription?: string;
   demoOutcome?: string;
+  demoDate?: string; 
+  demoFeedback?: string; 
+  specialRequests?: string; 
+  planSelected?: string; 
 
   // Metadata from website
   selectedPlan?: string; 
@@ -76,6 +81,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCustomerEmail, setSelectedCustomerEmail] = useState<string | null>(null);
   
+  // Suggestion UI States
+  const [showSuggestions, setShowSuggestions] = useState<'new' | 'edit' | null>(null);
+  const suggestionRef = useRef<HTMLDivElement>(null);
+
   // Manual Form State
   const [newLog, setNewLog] = useState<Partial<Inquiry>>({
     name: '',
@@ -86,10 +95,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     message: '',
     clientResponse: '',
     clientFeedback: '',
-    onboardingStatus: 'not_onboarded',
+    onboardingStatus: undefined, // Default to Pipeline/Pending
     demoSelected: false,
     demoDescription: '',
     demoOutcome: '',
+    demoDate: '',
+    demoFeedback: '',
+    planSelected: '',
+    specialRequests: '',
     interest: 'Manual Entry'
   });
   const [formLoading, setFormLoading] = useState(false);
@@ -97,6 +110,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   // Modal States
   const [viewingInquiry, setViewingInquiry] = useState<Inquiry | null>(null);
   const [editingInquiry, setEditingInquiry] = useState<Inquiry | null>(null);
+  const [isNewInteractionMode, setIsNewInteractionMode] = useState(false);
   const [showRecordVault, setShowRecordVault] = useState(false);
   const [vaultFilter, setVaultFilter] = useState<RecordFilterType>('processing');
 
@@ -139,6 +153,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     };
   }, [isAuthenticated]);
 
+  // Click outside to close suggestions
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (suggestionRef.current && !suggestionRef.current.contains(event.target as Node)) {
+        setShowSuggestions(null);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     if (password === 'admin123') {
@@ -171,8 +196,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       setNewLog({
         name: '', ownerName: '', email: '', phone: '', address: '',
         message: '', clientResponse: '', clientFeedback: '',
-        onboardingStatus: 'not_onboarded', demoSelected: false,
-        demoDescription: '', demoOutcome: '', interest: 'Manual Entry'
+        onboardingStatus: undefined, demoSelected: false,
+        demoDescription: '', demoOutcome: '', demoDate: '', demoFeedback: '',
+        planSelected: '', specialRequests: '', interest: 'Manual Entry'
       });
       setActiveTab('history');
     } catch (err) {
@@ -195,20 +221,35 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     try {
       const { id, ...data } = editingInquiry;
       const updateData = { ...data };
-      if (activeTab === 'inquiries' || updateData.onboardingStatus) {
-        updateData.status = 'processed';
+      
+      if (isNewInteractionMode) {
+        const inquiriesRef = ref(db, 'inquiries');
+        await push(inquiriesRef, {
+          ...updateData,
+          timestamp: new Date().toISOString(),
+          status: updateData.onboardingStatus === 'onboarded' ? 'processed' : (updateData.status || 'new'),
+          source: 'CRM Detail Overwrite'
+        });
+      } else {
+        if (activeTab === 'inquiries' || updateData.onboardingStatus) {
+          updateData.status = updateData.status || 'processed';
+        }
+        await update(ref(db, `inquiries/${id}`), updateData);
       }
-      await update(ref(db, `inquiries/${id}`), updateData);
+      
       setEditingInquiry(null);
+      setIsNewInteractionMode(false);
       if (viewingInquiry && viewingInquiry.id === id) {
         setViewingInquiry({ ...viewingInquiry, ...updateData });
       }
+      alert(isNewInteractionMode ? 'New interaction logged.' : 'Record updated successfully.');
     } catch (err) {
-      alert('Update failed.');
+      alert('Operation failed.');
     }
   };
 
   const getPlanDisplay = (inq: Inquiry) => {
+    if (inq.planSelected) return inq.planSelected;
     if (inq.selectedPlan) return inq.selectedPlan;
     if (inq.plan) return `${inq.plan.toUpperCase()} PLAN`;
     const interest = (inq.interest || inq.product || '').toLowerCase();
@@ -231,22 +272,31 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
       name: string;
       email: string;
       phone: string;
+      ownerName?: string;
+      address?: string;
       lastActive: string;
       inquiries: Inquiry[];
     }>();
     inquiries.forEach(inq => {
-      const email = inq.email || inq.phone || 'unknown';
-      if (!map.has(email)) {
-        map.set(email, {
+      const key = (inq.email || inq.phone || 'unknown').toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, {
           name: inq.name || 'External User',
           email: inq.email || 'N/A',
           phone: inq.phone || 'N/A',
+          ownerName: inq.ownerName,
+          address: inq.address,
           lastActive: inq.timestamp,
           inquiries: []
         });
       }
-      const data = map.get(email)!;
+      const data = map.get(key)!;
       data.inquiries.push(inq);
+      
+      // Keep most detailed metadata
+      if (!data.ownerName && inq.ownerName) data.ownerName = inq.ownerName;
+      if (!data.address && inq.address) data.address = inq.address;
+      
       if (new Date(inq.timestamp) > new Date(data.lastActive)) {
         data.lastActive = inq.timestamp;
       }
@@ -254,10 +304,41 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     return Array.from(map.values()).sort((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime());
   }, [inquiries]);
 
+  const selectedCustomerEmailVal = selectedCustomerEmail;
+
   const selectedCustomer = useMemo(() => {
-    if (!selectedCustomerEmail) return null;
-    return groupedCustomers.find(c => c.email === selectedCustomerEmail || c.phone === selectedCustomerEmail) || null;
-  }, [selectedCustomerEmail, groupedCustomers]);
+    if (!selectedCustomerEmailVal) return null;
+    return groupedCustomers.find(c => c.email.toLowerCase() === selectedCustomerEmailVal.toLowerCase() || c.phone === selectedCustomerEmailVal) || null;
+  }, [selectedCustomerEmailVal, groupedCustomers]);
+
+  // Suggestions filter
+  const getSuggestions = (input: string) => {
+    if (!input || input.length < 2) return [];
+    const lowerInput = input.toLowerCase();
+    return groupedCustomers.filter(c => 
+      c.name.toLowerCase().includes(lowerInput) || 
+      c.ownerName?.toLowerCase().includes(lowerInput) ||
+      c.phone.includes(lowerInput) ||
+      c.email.toLowerCase().includes(lowerInput)
+    ).slice(0, 5);
+  };
+
+  const handleSelectSuggestion = (client: any, mode: 'new' | 'edit') => {
+    const fillData = {
+      name: client.name,
+      ownerName: client.ownerName || '',
+      email: client.email !== 'N/A' ? client.email : '',
+      phone: client.phone !== 'N/A' ? client.phone : '',
+      address: client.address || ''
+    };
+
+    if (mode === 'new') {
+      setNewLog(prev => ({ ...prev, ...fillData }));
+    } else if (mode === 'edit') {
+      setEditingInquiry(prev => prev ? ({ ...prev, ...fillData }) : null);
+    }
+    setShowSuggestions(null);
+  };
 
   const filteredData = useMemo(() => {
     if (activeTab === 'inquiries' || activeTab === 'history') {
@@ -292,6 +373,39 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     if (vaultFilter === 'lost') return inquiries.filter(i => i.onboardingStatus === 'not_onboarded');
     return inquiries.filter(i => !i.onboardingStatus);
   }, [inquiries, vaultFilter]);
+
+  const handleAddNewInquiryForCustomer = () => {
+    if (!selectedCustomer) return;
+    setIsNewInteractionMode(true);
+    setEditingInquiry({
+      id: `new_${Date.now()}`,
+      name: selectedCustomer.name,
+      ownerName: selectedCustomer.ownerName || '',
+      email: selectedCustomer.email !== 'N/A' ? selectedCustomer.email : '',
+      phone: selectedCustomer.phone !== 'N/A' ? selectedCustomer.phone : '',
+      address: selectedCustomer.address || '',
+      interest: 'Follow-up Interaction',
+      status: 'new',
+      onboardingStatus: undefined,
+      timestamp: new Date().toISOString(),
+      message: '',
+      clientResponse: '',
+      clientFeedback: '',
+      demoSelected: false,
+      demoDescription: '',
+      demoOutcome: '',
+      demoDate: '',
+      demoFeedback: '',
+      planSelected: '',
+      specialRequests: ''
+    });
+  };
+
+  const getOnboardingCycleValue = (current: string | undefined): any => {
+    if (!current) return 'onboarded';
+    if (current === 'onboarded') return 'not_onboarded';
+    return undefined;
+  };
 
   if (!isAuthenticated) {
     return (
@@ -443,8 +557,32 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                               placeholder="Client / Company Name" 
                               className="w-full bg-black/40 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-sm text-white focus:border-blue-500 transition-all outline-none"
                               value={newLog.name}
-                              onChange={(e) => setNewLog({...newLog, name: e.target.value})}
+                              onChange={(e) => {
+                                setNewLog({...newLog, name: e.target.value});
+                                setShowSuggestions('new');
+                              }}
+                              onFocus={() => setShowSuggestions('new')}
                             />
+                            {/* NEW LOG SUGGESTIONS */}
+                            {showSuggestions === 'new' && getSuggestions(newLog.name || '').length > 0 && (
+                              <div ref={suggestionRef} className="absolute z-50 left-0 right-0 top-full mt-2 bg-[#1a1a1a] border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden animate-fade-in">
+                                {getSuggestions(newLog.name || '').map((client, idx) => (
+                                  <div 
+                                    key={idx}
+                                    onClick={() => handleSelectSuggestion(client, 'new')}
+                                    className="p-4 border-b border-white/5 last:border-0 hover:bg-blue-600/10 cursor-pointer group transition-all"
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <div>
+                                        <p className="text-xs font-black text-white group-hover:text-blue-400">{client.name}</p>
+                                        <p className="text-[9px] text-gray-500 font-mono mt-0.5">{client.phone} • {client.email}</p>
+                                      </div>
+                                      <SearchCode size={14} className="text-gray-700 group-hover:text-blue-500" />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           <div className="relative">
                             <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
@@ -512,11 +650,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                          <div className="grid grid-cols-2 gap-4">
                             <button 
                               type="button"
-                              onClick={() => setNewLog({...newLog, onboardingStatus: newLog.onboardingStatus === 'onboarded' ? 'not_onboarded' : 'onboarded'})}
-                              className={`flex flex-col items-center gap-3 p-6 rounded-[2rem] border transition-all ${newLog.onboardingStatus === 'onboarded' ? 'bg-emerald-600 border-emerald-500 shadow-xl shadow-emerald-500/20' : 'bg-black/20 border-white/5 text-gray-600 hover:border-emerald-500/30'}`}
+                              onClick={() => setNewLog({...newLog, onboardingStatus: getOnboardingCycleValue(newLog.onboardingStatus)})}
+                              className={`flex flex-col items-center gap-3 p-6 rounded-[2rem] border transition-all ${
+                                newLog.onboardingStatus === 'onboarded' ? 'bg-emerald-600 border-emerald-500 shadow-xl shadow-emerald-500/20' : 
+                                newLog.onboardingStatus === 'not_onboarded' ? 'bg-red-600 border-red-500 shadow-xl shadow-red-500/20' :
+                                'bg-black/20 border-white/5 text-gray-600 hover:border-blue-500/30'
+                              }`}
                             >
-                              <CheckCircle2 size={24} className={newLog.onboardingStatus === 'onboarded' ? 'text-white' : 'text-gray-700'} />
-                              <span className="text-[9px] font-black uppercase tracking-[0.2em]">{newLog.onboardingStatus === 'onboarded' ? 'Onboarding Ready' : 'Onboarding Pending'}</span>
+                              {newLog.onboardingStatus === 'onboarded' ? <CheckCircle2 size={24} className="text-white" /> : 
+                               newLog.onboardingStatus === 'not_onboarded' ? <XCircle size={24} className="text-white" /> :
+                               <AlertCircle size={24} className="text-blue-500" />}
+                              
+                              <span className="text-[9px] font-black uppercase tracking-[0.2em]">
+                                {newLog.onboardingStatus === 'onboarded' ? 'Onboarded' : 
+                                 newLog.onboardingStatus === 'not_onboarded' ? 'Lost Opportunity' : 'In Pipeline'}
+                              </span>
                             </button>
                             <button 
                               type="button"
@@ -529,26 +677,49 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                          </div>
                       </div>
 
-                      {/* Dynamic Demo Feedback */}
-                      {newLog.demoSelected && (
-                        <div className="space-y-6 animate-fade-in">
-                          <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><MonitorPlay size={12}/> Demo Record Data</label>
-                          <div className="space-y-4">
-                             <input 
-                              placeholder="Demo Description (What was showcased?)" 
-                              className="w-full bg-black/40 border border-indigo-500/20 rounded-2xl py-4 px-6 text-sm text-white outline-none focus:border-indigo-500 transition-all"
-                              value={newLog.demoDescription}
-                              onChange={(e) => setNewLog({...newLog, demoDescription: e.target.value})}
-                             />
-                             <textarea 
-                              placeholder="Final Outcome of the Demo..." 
-                              className="w-full bg-black/40 border border-indigo-500/20 rounded-[2rem] py-4 px-6 text-sm text-white outline-none focus:border-indigo-500 transition-all h-[80px] resize-none"
-                              value={newLog.demoOutcome}
-                              onChange={(e) => setNewLog({...newLog, demoOutcome: e.target.value})}
-                             />
+                      {/* Onboarding & Demo Detail Extensions */}
+                      <div className="space-y-6">
+                        {newLog.onboardingStatus === 'onboarded' && (
+                          <div className="space-y-4 animate-fade-in-up">
+                            <label className="text-[10px] font-black text-emerald-400 uppercase tracking-widest flex items-center gap-2"><Package size={12}/> Subscription Configuration</label>
+                            <input 
+                              placeholder="Plan Selected (e.g., Enterprise Yearly)" 
+                              className="w-full bg-black/40 border border-emerald-500/20 rounded-2xl py-4 px-6 text-sm text-white outline-none focus:border-emerald-500 transition-all font-bold uppercase"
+                              value={newLog.planSelected}
+                              onChange={(e) => setNewLog({...newLog, planSelected: e.target.value})}
+                            />
                           </div>
-                        </div>
-                      )}
+                        )}
+                        {newLog.demoSelected && (
+                          <div className="space-y-4 animate-fade-in-up">
+                            <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><CalendarDays size={12}/> Demo Schedule</label>
+                            <input 
+                              type="date"
+                              className="w-full bg-black/40 border border-indigo-500/20 rounded-2xl py-4 px-6 text-sm text-white outline-none focus:border-indigo-500 transition-all"
+                              value={newLog.demoDate}
+                              onChange={(e) => setNewLog({...newLog, demoDate: e.target.value})}
+                            />
+                            <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mt-2"><MessageSquareDiff size={12}/> Demo Feedback Output</label>
+                            <textarea 
+                              placeholder="Feedback for the demo output / response..." 
+                              className="w-full bg-black/40 border border-indigo-500/10 rounded-[2rem] py-4 px-6 text-sm text-white focus:border-indigo-500 transition-all outline-none h-[100px] resize-none"
+                              value={newLog.demoFeedback}
+                              onChange={(e) => setNewLog({...newLog, demoFeedback: e.target.value})}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* New Textarea for Special Requests / Edits */}
+                    <div className="space-y-4 pt-8 border-t border-white/5">
+                      <label className="text-[10px] font-black text-orange-500 uppercase tracking-widest flex items-center gap-2"><Settings2 size={12}/> Custom Requirements / Edits Requested</label>
+                      <textarea 
+                        placeholder="Any specific features, edits, or custom requests mentioned by the client..." 
+                        className="w-full bg-black/40 border border-white/10 rounded-[2rem] py-6 px-8 text-sm text-white focus:border-orange-500 transition-all outline-none h-[120px] resize-none"
+                        value={newLog.specialRequests}
+                        onChange={(e) => setNewLog({...newLog, specialRequests: e.target.value})}
+                      />
                     </div>
 
                     <button 
@@ -648,7 +819,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
                     <div className="lg:col-span-2 space-y-6">
                        <div className="bg-[#111] rounded-[3rem] border border-white/5 p-8">
-                          <h4 className="text-[10px] font-black text-gray-600 uppercase tracking-widest mb-8">Unified Activity Logs</h4>
+                          <div className="flex items-center justify-between mb-8">
+                            <h4 className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Unified Activity Logs</h4>
+                            <button 
+                              onClick={handleAddNewInquiryForCustomer}
+                              className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all flex items-center gap-2 shadow-lg shadow-blue-600/10"
+                            >
+                              <Plus size={14} /> Add New Interaction
+                            </button>
+                          </div>
                           <div className="space-y-10">
                             {selectedCustomer.inquiries.map((inq) => (
                               <div key={inq.id} className="relative pl-8 border-l border-white/5 group">
@@ -793,7 +972,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                                     {inquiry.onboardingStatus === 'onboarded' ? (
                                       <div className="flex items-center gap-2 text-emerald-500">
                                         <CheckCircle2 size={12} />
-                                        <span className="text-[9px] font-black uppercase tracking-widest">{inquiry.finalizedPlan || 'SUCCESS'}</span>
+                                        <span className="text-[9px] font-black uppercase tracking-widest">{inquiry.finalizedPlan || inquiry.planSelected || 'SUCCESS'}</span>
                                       </div>
                                     ) : inquiry.onboardingStatus === 'not_onboarded' ? (
                                       <div className="flex items-center gap-2 text-red-500">
@@ -982,7 +1161,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     {viewingInquiry.demoSelected && (
                       <div className="flex flex-col gap-2 p-4 bg-indigo-600/10 border border-indigo-600/20 rounded-2xl">
                         <div className="flex items-center gap-2 text-indigo-400 font-black uppercase text-[10px]"><MonitorPlay size={14}/> Demo engaged</div>
-                        <p className="text-[10px] text-gray-400 italic">Outcome: {viewingInquiry.demoOutcome || 'Pending'}</p>
+                        {viewingInquiry.demoDate && <p className="text-[10px] text-gray-300 font-black uppercase tracking-widest">Exec Date: {viewingInquiry.demoDate}</p>}
+                        {viewingInquiry.demoFeedback && <p className="text-[10px] text-emerald-400 font-bold uppercase mt-1 leading-tight"><MessageSquareDiff size={12} className="inline mr-1"/> Feedback: {viewingInquiry.demoFeedback}</p>}
+                        <p className="text-[10px] text-gray-400 italic leading-relaxed">Outcome: {viewingInquiry.demoOutcome || 'Pending'}</p>
                       </div>
                     )}
                   </div>
@@ -993,15 +1174,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Lifecycle Outcome</p>
                   <div className="p-6 rounded-[2rem] border border-emerald-500/20 bg-emerald-500/5">
                     <div className="flex items-center gap-3 mb-4">
-                       <div className={`w-3 h-3 rounded-full ${viewingInquiry.onboardingStatus === 'onboarded' ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
-                       <span className="text-xs font-black uppercase text-white tracking-widest">{viewingInquiry.onboardingStatus === 'onboarded' ? 'SUCCESS' : 'IN PIPELINE'}</span>
+                       <div className={`w-3 h-3 rounded-full ${viewingInquiry.onboardingStatus === 'onboarded' ? 'bg-emerald-500' : viewingInquiry.onboardingStatus === 'not_onboarded' ? 'bg-red-500' : 'bg-blue-600'}`}></div>
+                       <span className="text-xs font-black uppercase text-white tracking-widest">
+                         {viewingInquiry.onboardingStatus === 'onboarded' ? 'SUCCESS' : 
+                          viewingInquiry.onboardingStatus === 'not_onboarded' ? 'LOST' : 'IN PIPELINE'}
+                       </span>
                     </div>
+                    {viewingInquiry.planSelected && <p className="text-[10px] text-emerald-400 font-black uppercase mb-3 tracking-widest border border-emerald-500/20 px-2 py-1 rounded bg-emerald-500/5 inline-block">Plan: {viewingInquiry.planSelected}</p>}
                     <p className="text-[10px] text-gray-500 font-bold uppercase leading-relaxed">System Response: {viewingInquiry.clientResponse || 'N/A'}</p>
                   </div>
                 </div>
               </div>
 
-              {/* Narratives */}
+              {/* Narratives & Special Requests */}
               <div className="grid md:grid-cols-2 gap-8">
                 <div className="space-y-4">
                   <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><FileText size={14}/> Meeting Brief</p>
@@ -1010,17 +1195,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   </div>
                 </div>
                 <div className="space-y-4">
-                  <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><Star size={14}/> Client Feedback</p>
-                  <div className="bg-white/[0.03] border border-white/5 p-6 rounded-[2rem]">
-                    <p className="text-sm text-gray-300 leading-relaxed italic">"{viewingInquiry.clientFeedback || 'No feedback logged.'}"</p>
+                  <p className="text-[10px] font-black text-orange-500 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><Settings2 size={14}/> Special Requirements</p>
+                  <div className="bg-orange-500/[0.03] border border-orange-500/10 p-6 rounded-[2rem]">
+                    <p className="text-sm text-gray-300 leading-relaxed italic">"{viewingInquiry.specialRequests || 'No custom edits or special features requested.'}"</p>
                   </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><Star size={14}/> Client Feedback</p>
+                <div className="bg-white/[0.03] border border-white/5 p-6 rounded-[2rem]">
+                  <p className="text-sm text-gray-300 leading-relaxed italic">"{viewingInquiry.clientFeedback || 'No feedback logged.'}"</p>
                 </div>
               </div>
             </div>
 
             <footer className="p-10 border-t border-white/5 bg-black/40 flex gap-5">
                <button onClick={() => deleteItem('inquiries', viewingInquiry.id)} className="px-6 py-4 bg-red-600/10 border border-red-600/20 text-red-500 rounded-2xl hover:bg-red-600 hover:text-white transition-all"><Trash2 size={20}/></button>
-               <button onClick={() => { setEditingInquiry(viewingInquiry); setViewingInquiry(null); }} className="flex-grow py-4 bg-blue-600 rounded-2xl text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 transition-all flex items-center justify-center gap-2">
+               <button onClick={() => { setEditingInquiry(viewingInquiry); setViewingInquiry(null); setIsNewInteractionMode(false); }} className="flex-grow py-4 bg-blue-600 rounded-2xl text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500 transition-all flex items-center justify-center gap-2">
                  <Zap size={16} /> Edit Operational State
                </button>
             </footer>
@@ -1028,81 +1220,231 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
         </div>
       )}
 
-      {/* MODAL 2: EDIT/RESOLVE */}
+      {/* MODAL 2: FULL COMPREHENSIVE EDIT (Mirrors New Sales Engagement) */}
       {editingInquiry && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-black/95 backdrop-blur-xl animate-fade-in">
-          <div className="w-full max-w-2xl bg-[#0d0d0d] border border-blue-500/20 rounded-[4rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <header className="p-10 border-b border-white/5 flex items-center justify-between bg-black/40">
-              <div className="flex items-center gap-4">
-                <div className="p-4 bg-blue-600/10 text-blue-500 rounded-[1.5rem]"><Edit3 size={28} /></div>
+          <div className="w-full max-w-5xl bg-[#111] border border-white/10 rounded-[3.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <header className="p-10 border-b border-white/5 flex items-center justify-between bg-black/40 relative">
+              <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-blue-600 to-indigo-800"></div>
+              <div className="flex items-center gap-6">
+                <div className="p-5 bg-blue-600/10 text-blue-500 rounded-[1.8rem] border border-blue-600/20">
+                  {isNewInteractionMode ? <Plus size={32} /> : <Edit3 size={32} />}
+                </div>
                 <div>
-                  <h3 className="text-2xl font-black uppercase tracking-tight text-white">Lead Finalization</h3>
-                  <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest">Update Lifecycle for {editingInquiry.name}</p>
+                  <h3 className="text-3xl font-black uppercase tracking-tight text-white">
+                    {isNewInteractionMode ? 'Create New Engagement' : 'Modify Engagement Record'}
+                  </h3>
+                  <div className="flex items-center gap-2 mt-1">
+                    <Terminal size={12} className="text-blue-500" />
+                    <p className="text-[11px] text-gray-500 uppercase font-black tracking-widest">
+                      {isNewInteractionMode ? 'Operator Input Mode' : 'Operator Overwrite Mode'} • {isNewInteractionMode ? 'Creating New Entry' : `Record ID: ${editingInquiry.id.slice(0,8)}`}
+                    </p>
+                  </div>
                 </div>
               </div>
-              <button onClick={() => setEditingInquiry(null)} className="p-2 text-gray-500 hover:text-white transition-all"><X size={28} /></button>
+              <button onClick={() => { setEditingInquiry(null); setIsNewInteractionMode(false); }} className="p-4 bg-white/5 hover:bg-white/10 rounded-full text-gray-400 hover:text-white transition-all border border-white/5"><X size={28} /></button>
             </header>
 
-            <div className="p-10 overflow-y-auto space-y-12 custom-scrollbar">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div className="space-y-4">
-                  <label className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Lifecycle Stage</label>
-                  <div className="flex flex-col gap-2">
+            <div className="p-12 overflow-y-auto custom-scrollbar flex-grow bg-gradient-to-b from-black/20 to-transparent">
+              <div className="space-y-12">
+                <div className="grid md:grid-cols-2 gap-x-12 gap-y-8">
+                  {/* Identity Section */}
+                  <div className="space-y-6">
+                    <label className="text-[10px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2"><Building2 size={12}/> Client Identification</label>
+                    <div className="space-y-4">
+                      <div className="relative">
+                        <User className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                        <input 
+                          placeholder="Client / Company Name" 
+                          className="w-full bg-black/40 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-sm text-white focus:border-blue-500 transition-all outline-none"
+                          value={editingInquiry.name}
+                          onChange={(e) => {
+                            setEditingInquiry({...editingInquiry, name: e.target.value});
+                            setShowSuggestions('edit');
+                          }}
+                          onFocus={() => setShowSuggestions('edit')}
+                        />
+                        {/* EDIT LOG SUGGESTIONS */}
+                        {showSuggestions === 'edit' && getSuggestions(editingInquiry.name || '').length > 0 && (
+                          <div ref={suggestionRef} className="absolute z-50 left-0 right-0 top-full mt-2 bg-[#1a1a1a] border border-blue-500/30 rounded-2xl shadow-2xl overflow-hidden animate-fade-in">
+                            {getSuggestions(editingInquiry.name || '').map((client, idx) => (
+                              <div 
+                                key={idx}
+                                onClick={() => handleSelectSuggestion(client, 'edit')}
+                                className="p-4 border-b border-white/5 last:border-0 hover:bg-blue-600/10 cursor-pointer group transition-all"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="text-xs font-black text-white group-hover:text-blue-400">{client.name}</p>
+                                    <p className="text-[9px] text-gray-500 font-mono mt-0.5">{client.phone} • {client.email}</p>
+                                  </div>
+                                  <SearchCode size={14} className="text-gray-700 group-hover:text-blue-500" />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                        <input 
+                          placeholder="Owner Name" 
+                          className="w-full bg-black/40 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-sm text-white focus:border-blue-500 transition-all outline-none"
+                          value={editingInquiry.ownerName}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, ownerName: e.target.value})}
+                        />
+                      </div>
+                      <div className="relative">
+                        <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                        <input 
+                          placeholder="Contact Number (WhatsApp)" 
+                          className="w-full bg-black/40 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-sm text-white focus:border-blue-500 transition-all outline-none"
+                          value={editingInquiry.phone}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, phone: e.target.value})}
+                        />
+                      </div>
+                      <div className="relative">
+                        <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                        <input 
+                          placeholder="Business Address / City" 
+                          className="w-full bg-black/40 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-sm text-white focus:border-blue-500 transition-all outline-none"
+                          value={editingInquiry.address}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, address: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Interaction Intelligence Section */}
+                  <div className="space-y-6">
+                    <label className="text-[10px] font-black text-purple-500 uppercase tracking-widest flex items-center gap-2"><MessageSquareQuote size={12}/> Meeting Intelligence</label>
+                    <div className="space-y-4">
+                      <textarea 
+                        placeholder="Main Meeting Description & Context..." 
+                        className="w-full bg-black/40 border border-white/10 rounded-[2rem] py-4 px-6 text-sm text-white focus:border-purple-500 transition-all outline-none h-[120px] resize-none"
+                        value={editingInquiry.message}
+                        onChange={(e) => setEditingInquiry({...editingInquiry, message: e.target.value})}
+                      />
+                      <textarea 
+                        placeholder="Internal Response / Narrative of Meeting..." 
+                        className="w-full bg-black/40 border border-white/10 rounded-[2rem] py-4 px-6 text-sm text-white focus:border-purple-500 transition-all outline-none h-[80px] resize-none"
+                        value={editingInquiry.clientResponse}
+                        onChange={(e) => setEditingInquiry({...editingInquiry, clientResponse: e.target.value})}
+                      />
+                      <div className="relative">
+                        <Star className="absolute left-4 top-4 text-gray-500" size={16} />
+                        <textarea 
+                          placeholder="Client Feedback & Sentiment..." 
+                          className="w-full bg-black/40 border border-white/10 rounded-[2rem] py-4 pl-12 pr-6 text-sm text-white focus:border-purple-500 transition-all outline-none h-[80px] resize-none"
+                          value={editingInquiry.clientFeedback}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, clientFeedback: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-10 border-t border-white/5 grid md:grid-cols-2 gap-12">
+                  {/* Strategic Toggle Section */}
+                  <div className="space-y-6">
+                     <label className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Deployment Strategy</label>
+                     <div className="grid grid-cols-2 gap-4">
+                        <button 
+                          type="button"
+                          onClick={() => setEditingInquiry({...editingInquiry, onboardingStatus: getOnboardingCycleValue(editingInquiry.onboardingStatus)})}
+                          className={`flex flex-col items-center gap-3 p-6 rounded-[2rem] border transition-all ${
+                            editingInquiry.onboardingStatus === 'onboarded' ? 'bg-emerald-600 border-emerald-500 shadow-xl shadow-emerald-500/20' : 
+                            editingInquiry.onboardingStatus === 'not_onboarded' ? 'bg-red-600 border-red-500 shadow-xl shadow-red-500/20' :
+                            'bg-black/20 border-white/5 text-gray-600 hover:border-blue-500/30'
+                          }`}
+                        >
+                          {editingInquiry.onboardingStatus === 'onboarded' ? <CheckCircle2 size={24} className="text-white" /> : 
+                           editingInquiry.onboardingStatus === 'not_onboarded' ? <XCircle size={24} className="text-white" /> :
+                           <AlertCircle size={24} className="text-blue-500" />}
+                          
+                          <span className="text-[9px] font-black uppercase tracking-[0.2em]">
+                            {editingInquiry.onboardingStatus === 'onboarded' ? 'Onboarded' : 
+                             editingInquiry.onboardingStatus === 'not_onboarded' ? 'Lost Opportunity' : 'In Pipeline'}
+                          </span>
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setEditingInquiry({...editingInquiry, demoSelected: !editingInquiry.demoSelected})}
+                          className={`flex flex-col items-center gap-3 p-6 rounded-[2rem] border transition-all ${editingInquiry.demoSelected ? 'bg-indigo-600 border-indigo-500 shadow-xl shadow-indigo-500/20' : 'bg-black/20 border-white/5 text-gray-600 hover:border-indigo-500/30'}`}
+                        >
+                          <MonitorPlay size={24} className={editingInquiry.demoSelected ? 'text-white' : 'text-gray-700'} />
+                          <span className="text-[9px] font-black uppercase tracking-[0.2em]">{editingInquiry.demoSelected ? 'Demo Executed' : 'Demo Not Required'}</span>
+                        </button>
+                     </div>
+                  </div>
+
+                  {/* Onboarding & Demo Detail Extensions */}
+                  <div className="space-y-6">
+                    {editingInquiry.onboardingStatus === 'onboarded' && (
+                      <div className="space-y-4 animate-fade-in-up">
+                        <label className="text-[10px] font-black text-emerald-400 uppercase tracking-widest flex items-center gap-2"><Package size={12}/> Subscription Configuration</label>
+                        <input 
+                          placeholder="Plan Selected (e.g., Enterprise Yearly)" 
+                          className="w-full bg-black/40 border border-emerald-500/20 rounded-2xl py-4 px-6 text-sm text-white outline-none focus:border-emerald-500 transition-all font-bold uppercase"
+                          value={editingInquiry.planSelected}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, planSelected: e.target.value})}
+                        />
+                      </div>
+                    )}
+                    {editingInquiry.demoSelected && (
+                      <div className="space-y-4 animate-fade-in-up">
+                        <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2"><CalendarDays size={12}/> Demo Schedule Update</label>
+                        <input 
+                          type="date"
+                          className="w-full bg-black/40 border border-indigo-500/20 rounded-2xl py-4 px-6 text-sm text-white outline-none focus:border-indigo-500 transition-all"
+                          value={editingInquiry.demoDate}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, demoDate: e.target.value})}
+                        />
+                        <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mt-2"><MessageSquareDiff size={12}/> Demo Feedback Output</label>
+                        <textarea 
+                          placeholder="Update feedback for the demo output / response..." 
+                          className="w-full bg-black/40 border border-indigo-500/10 rounded-[2rem] py-4 px-6 text-sm text-white focus:border-indigo-500 transition-all outline-none h-[100px] resize-none"
+                          value={editingInquiry.demoFeedback}
+                          onChange={(e) => setEditingInquiry({...editingInquiry, demoFeedback: e.target.value})}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Special Requests / Edits */}
+                <div className="space-y-4 pt-10 border-t border-white/5">
+                  <label className="text-[10px] font-black text-orange-500 uppercase tracking-widest flex items-center gap-2"><Settings2 size={12}/> Custom Requirements / Edits Requested</label>
+                  <textarea 
+                    placeholder="Modify specific features, edits, or custom requests..." 
+                    className="w-full bg-black/40 border border-white/10 rounded-[2rem] py-6 px-8 text-sm text-white focus:border-orange-500 transition-all outline-none h-[120px] resize-none"
+                    value={editingInquiry.specialRequests}
+                    onChange={(e) => setEditingInquiry({...editingInquiry, specialRequests: e.target.value})}
+                  />
+                </div>
+
+                <div className="space-y-4 pt-10 border-t border-white/5">
+                  <label className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Global Lifecycle Status</label>
+                  <div className="flex gap-4">
                     {['new', 'processed', 'closed'].map(st => (
                       <button 
                         key={st}
                         onClick={() => setEditingInquiry({...editingInquiry, status: st as any})}
-                        className={`py-3.5 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all ${editingInquiry.status === st ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-600/20' : 'bg-black/20 border-white/5 text-gray-500 hover:bg-white/5'}`}
+                        className={`flex-1 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all ${editingInquiry.status === st ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-black/20 border-white/5 text-gray-600 hover:bg-white/5'}`}
                       >
-                        {st === 'new' ? 'Pending' : st === 'processed' ? 'Processing' : 'Closed'}
+                        {st === 'new' ? 'Pipeline' : st === 'processed' ? 'Active Processing' : 'Archived / Closed'}
                       </button>
                     ))}
                   </div>
                 </div>
-                <div className="space-y-4">
-                  <label className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] ml-1">Onboarding Outcome</label>
-                  <div className="flex flex-col gap-2">
-                    <button 
-                      onClick={() => setEditingInquiry({...editingInquiry, onboardingStatus: 'onboarded'})}
-                      className={`py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all flex items-center justify-center gap-2 ${editingInquiry.onboardingStatus === 'onboarded' ? 'bg-emerald-600 border-emerald-500 text-white shadow-xl shadow-emerald-500/20' : 'bg-black/20 border-white/5 text-gray-500 hover:border-emerald-500/50'}`}
-                    >
-                      <CheckCircle2 size={16} /> Mark Onboarded
-                    </button>
-                    <button 
-                      onClick={() => setEditingInquiry({...editingInquiry, onboardingStatus: 'not_onboarded'})}
-                      className={`py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all flex items-center justify-center gap-2 ${editingInquiry.onboardingStatus === 'not_onboarded' ? 'bg-red-600 border-red-500 text-white shadow-xl shadow-red-500/20' : 'bg-black/20 border-white/5 text-gray-500 hover:border-red-500/50'}`}
-                    >
-                      <XCircle size={16} /> Mark Lost
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-8 pt-8 border-t border-white/5">
-                <div className="space-y-3">
-                  <label className="text-[10px] font-black text-blue-500 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><MessageCircle size={14}/> Interaction Response</label>
-                  <textarea 
-                    value={editingInquiry.clientResponse || ''}
-                    onChange={(e) => setEditingInquiry({...editingInquiry, clientResponse: e.target.value})}
-                    placeholder="Describe internal interaction notes..."
-                    className="w-full h-28 bg-black/40 border border-white/10 rounded-[2rem] py-5 px-6 text-sm text-white focus:ring-1 focus:ring-blue-500 transition-all outline-none resize-none"
-                  />
-                </div>
-                <div className="space-y-3">
-                  <label className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.2em] ml-1 flex items-center gap-2"><MonitorPlay size={14}/> Demo Narrative</label>
-                  <textarea 
-                    value={editingInquiry.demoDescription || ''}
-                    onChange={(e) => setEditingInquiry({...editingInquiry, demoDescription: e.target.value})}
-                    placeholder="Specific convinced features or custom needs..."
-                    className="w-full h-28 bg-black/40 border border-white/10 rounded-[2rem] py-5 px-6 text-sm text-white focus:ring-1 focus:ring-emerald-500 transition-all outline-none resize-none"
-                  />
-                </div>
               </div>
             </div>
 
-            <footer className="p-10 border-t border-white/5 bg-black/40 flex gap-5">
-               <button onClick={() => setEditingInquiry(null)} className="flex-1 py-4 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest text-gray-500 hover:bg-white/5 transition-all">Discard</button>
-               <button onClick={handleUpdateInquiry} className="flex-[2] py-5 bg-blue-600 rounded-2xl text-[10px] font-black uppercase tracking-widest text-white shadow-2xl shadow-blue-600/30 hover:bg-blue-500 transition-all flex items-center justify-center gap-2 font-black uppercase"><Save size={18} /> Finalize Lead Outcome</button>
+            <footer className="p-10 border-t border-white/5 bg-black/40 flex gap-6">
+               <button onClick={() => { setEditingInquiry(null); setIsNewInteractionMode(false); }} className="flex-1 py-5 border border-white/10 rounded-[2rem] text-[10px] font-black uppercase tracking-widest text-gray-500 hover:bg-white/5 transition-all">Discard Changes</button>
+               <button onClick={handleUpdateInquiry} className="flex-[2] py-5 bg-blue-600 rounded-[2rem] text-[10px] font-black uppercase tracking-widest text-white shadow-2xl shadow-blue-600/30 hover:bg-blue-500 transition-all flex items-center justify-center gap-3">
+                 <Save size={20} /> {isNewInteractionMode ? 'Save Interaction' : 'Overwrite Record Data'}
+               </button>
             </footer>
           </div>
         </div>
